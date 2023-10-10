@@ -7,7 +7,8 @@ name = "pypi"
 django = "*"
 djangorestframework = "*"
 numpy = "*"
-tensorflow = "*"
+tensorflow = "2.13.0"
+django-cors-headers = "*"
 
 [dev-packages]
 

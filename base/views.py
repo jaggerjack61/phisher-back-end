@@ -1,74 +1,33 @@
 from django.shortcuts import render
 from django.views import View
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
 import json
+from .models import *
+import ssl
+import urllib.request
 
 
 # from django.http import HttpResponse
 # Create your views here.
 
 class SiteClassifier(View):
-    def add_url(self, url, status, file_name='sites.csv'):
-        import csv
-        if self.search_url(url) != None:
-            self.delete_url(url)
+    def add_url(self, url, status):
+        site = Site(url=url, status=status)
+        site.save()
 
-        with open(file_name, "r") as csv_file:
-            # Create a csv reader object
-            csv_reader = csv.reader(csv_file)
-            # Get the number of rows in the csv file
-            row_count = sum(1 for row in csv_reader)
-            # Calculate the next id value by adding one to the row count
-            next_id = row_count - 1
+    def update_url(self, url, status):
+        site = Site.objects.filter(url=url).first()
+        site.status = status
+        site.save()
 
-        # Open the csv file in append mode
-        with open(file_name, "a") as csv_file:
-            # Create a csv writer object
-            csv_writer = csv.writer(csv_file, lineterminator="\n")
-            # Write the url and status as a new row
-            csv_writer.writerow([next_id, url, status])
-
-
-    def delete_url(self, url, file_name='sites.csv'):
-        import csv
-        # Create an empty list to store the rows that are not deleted
-        rows = []
-        # Open the csv file in read mode
-        with open(file_name, "r") as csv_file:
-            # Create a csv reader object
-            csv_reader = csv.reader(csv_file)
-            # Loop through the rows of the csv file
-            for row in csv_reader:
-                # Check if the url does not match the first column of the row
-                if url != row[1]:
-                    # Append the row to the list
-                    rows.append(row)
-        # Open the csv file in write mode
-        with open(file_name, "w") as csv_file:
-            # Create a csv writer object
-            csv_writer = csv.writer(csv_file, lineterminator="\n")
-            # Write the rows that are not deleted to the csv file
-            csv_writer.writerows(rows)
-
-    def search_url(self, url, file_name='sites.csv'):
-        import csv
-        with open(file_name, "r") as csv_file:
-            # Create a csv reader object
-            csv_reader = csv.reader(csv_file)
-            # Skip the header row
-            next(csv_reader)
-            # Loop through the rows of the csv file
-            for row in csv_reader:
-                # Check if the url matches the first column of the row
-                if url == row[1]:
-                    # Return the status from the second column of the row
-                    if row[2] == 'phishing':
-                        return True
-                    else:
-                        return False
-            # If no match is found, return None
+    def search_url(self, url):
+        site = Site.objects.filter(url=url).first()
+        if site:
+            if site.status == "phishing":
+                return True
+            else:
+                return False
+        else:
             return None
 
     def classify_url(self, url):
@@ -90,7 +49,7 @@ class SiteClassifier(View):
 
         features = np.reshape(features, (1, 8))
 
-        model = tf.keras.models.load_model('phishing_model.keras')
+        model = tf.keras.models.load_model('phishing_model.h5')
 
         probs = model.predict(features)
 
@@ -99,19 +58,43 @@ class SiteClassifier(View):
         else:
             return False
 
+    def check_ssl(self, url):
+        context = ssl.create_default_context()
+        try:
+            response = urllib.request.urlopen(url, context=context)
+            return True
+        except Exception as e:
+            return False
 
-class Home(View):
+    def add_log(self, url, status, source):
+        log = Log(url=url, status=status, source=source)
+        log.save()
+
+    def add_correction(self, url, status, source):
+        correction = Correction(url=url, status=status, source=source)
+        correction.save()
+
+
+class Home(SiteClassifier):
     def get(self, request):
         return render(request, 'home.html')
+
+    def post(self, request):
+        data = json.loads(request.body)
+        self.search_url(data['url'])
+        return JsonResponse({"message": "done"})
+
 
 
 class Status(SiteClassifier):
     def get(self, request):
-        return render(request, 'status.html')
+        all_sites = Site.objects.all()
+        return render(request, 'status.html', {'sites': all_sites})
 
     def post(self, request):
         data = json.loads(request.body)
-        self.add_url(data['url'], data['status'])
+        self.update_url(data['url'], data['status'])
+        self.add_correction(data['url'], data['status'], data['source'])
         data['message'] = 'success'
         return JsonResponse(data)
 
@@ -122,18 +105,50 @@ class CheckUrl(SiteClassifier):
 
     def post(self, request):
         data = json.loads(request.body)
-        # data["status"] = "received"
         print(data)
-        check = self.search_url(data['url'])
-        if check:
-            data['status'] = 'phishing'
-        elif check == None:
-            classify = self.classify_url(data['url'])
-            if classify:
+
+        if not data['check_ssl']:
+            check = self.search_url(data['url'])
+            if check:
                 data['status'] = 'phishing'
+            elif check == None:
+                classify = self.classify_url(data['url'])
+                if classify:
+                    self.add_url(data['url'], 'phishing')
+                    self.add_log(data['url'], 'phishing', data['source'])
+                    data['status'] = 'phishing'
+                else:
+                    self.add_url(data['url'], 'legitimate')
+                    self.add_log(data['url'], 'legitimate', data['source'])
+                    data['status'] = 'legitimate'
             else:
                 data['status'] = 'legitimate'
-        else:
-            data['status'] = 'legitimate'
 
-        return JsonResponse(data)
+            return JsonResponse(data)
+        elif data['check_ssl']:
+            if self.check_ssl(data['url']):
+                check = self.search_url(data['url'])
+                if check:
+                    data['status'] = 'phishing'
+                elif check == None:
+                    classify = self.classify_url(data['url'])
+                    if classify:
+                        self.add_url(data['url'], 'phishing')
+                        self.add_log(data['url'], 'phishing', data['source'])
+                        data['status'] = 'phishing'
+                    else:
+                        self.add_url(data['url'], 'legitimate')
+                        self.add_log(data['url'], 'legitimate', data['source'])
+                        data['status'] = 'legitimate'
+                else:
+                    data['status'] = 'legitimate'
+
+                return JsonResponse(data)
+            else:
+                check = self.search_url(data['url'])
+                if check == None:
+                    self.add_url(data['url'], 'phishing')
+                    data['status'] = 'phishing'
+                    return JsonResponse(data)
+
+
