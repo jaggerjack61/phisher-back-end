@@ -106,6 +106,7 @@ class Status(SiteClassifier):
 
     def post(self, request):
         data = json.loads(request.body)
+        print(data)
         self.update_url(data['url'], data['status'])
         self.add_correction(data['url'], data['status'], data['source'])
         data['message'] = 'success'
@@ -160,11 +161,9 @@ class CheckUrl(SiteClassifier):
 
                 return JsonResponse(data)
             else:
-                check = self.search_url(data['url'])
-                if check == None:
-                    self.add_url(data['url'], 'phishing')
-                    data['status'] = 'phishing'
-                    return JsonResponse(data)
+                self.add_url(data['url'], 'phishing')
+                data['status'] = 'phishing'
+                return JsonResponse(data)
 
 class Reports(View):
     def get(self, request):
@@ -176,35 +175,87 @@ class Reports(View):
         print(data)
         return JsonResponse(data)
 
+def is_number(obj):
+    try:
+        float(obj)
+        return True
+    except ValueError:
+        return False
+
+# Define a helper function to calculate the statistics from logs and corrections
+def calculate_stats(logs, corrections):
+    # Use list comprehensions to filter the logs and corrections by status
+    logs_phishing = [log for log in logs if log["status"] == "phishing"]
+    logs_legitimate = [log for log in logs if log["status"] == "legitimate"]
+    corrections_phishing = [correction for correction in corrections if correction["status"] == "phishing"]
+    corrections_legitimate = [correction for correction in corrections if correction["status"] == "legitimate"]
+
+    # Use built-in functions to count the number of elements in each list
+    TP = len(logs_phishing) - len(corrections_legitimate)
+    TN = len(logs_legitimate) - len(corrections_phishing)
+    FP = len(corrections_legitimate)
+    FN = len(corrections_phishing)
+    PA = TP + FN
+    T = len(logs)
+
+    # Return a dictionary with the calculated statistics
+    return {
+        'true_positives': TP,
+        'true_negatives': TN,
+        'false_positives': FP,
+        'false_negatives': FN,
+        'total_visits': T,
+        'phishing_attempts': PA,
+        'logs':logs
+    }
+
+# Define a class-based view for the Pie endpoint
 class Pie(View):
     def get(self, request):
+        # Get the current and previous time using timezone-aware objects
         now = timezone.now()
         yesterday = now - timedelta(hours=24)
+
+        # Query the Log and Correction models using the time range filter
         logs = list(Log.objects.filter(created_at__gte=yesterday).values())
-        T = Log.objects.filter(created_at__gte=yesterday).count()
         corrections = list(Correction.objects.filter(created_at__gte=yesterday).values())
-        logs_phishing = [item["status"] == "phishing" for item in logs]
-        logs_legitimate = [item["status"] == "legitimate" for item in logs]
-        corrections_phishing = [item["status"] == "phishing" for item in corrections]
-        corrections_legitimate = [item["status"] == "legitimate" for item in corrections]
-        print(sum(logs_phishing))
-        print(sum(corrections_phishing))
-        print(sum(logs_legitimate))
-        print(sum(corrections_legitimate))
-        TP = sum(logs_phishing) - sum(corrections_legitimate)
-        TN = sum(logs_legitimate) - sum(corrections_phishing)
-        FP = sum(corrections_legitimate)
-        FN = sum(corrections_phishing)
-        PA = sum(logs_phishing) - sum(corrections_legitimate) + sum(corrections_phishing)
-        data = {'true_positives': TP,
-                'true_negatives': TN,
-                'false_positives': FP,
-                'false_negatives': FN,
-                'total_visits': T,
-                'phishing_attempts':PA
-                }
-        # print(data)
+
+        # Calculate the statistics from the logs and corrections
+        data = calculate_stats(logs, corrections)
+
+        # Generate a list of date ranges for the last 24 hours with 3-hour intervals
+        date_ranges = [(now - timedelta(hours=i + 3), now - timedelta(hours=i)) for i in range(0, 24, 3)]
+
+        # Generate a list of dictionaries with the data count and the start and end times for each date range
+        coordinates = []
+        for start, end in date_ranges:
+            # Query the Log model using the date range filter and count the number of results
+            count = Log.objects.filter(created_at__range=(start, end)).count()
+            # Append a dictionary with the data count and the ISO-formatted start and end times to the coordinates list
+            coordinates.append({"data_count": count, "start": start.isoformat(), "end": end.isoformat()})
+        data['coordinates'] = coordinates
         return JsonResponse(data)
 
+    def post(self, request):
+        # Get the start and stop dates from the request data as strings
+        data = json.loads(request.body)
+        print(data)
+        start = data['start']
+        stop = data['stop']
 
+        # Import the datetime module
+        import datetime
+
+        # Parse the start and stop dates as datetime objects using strptime
+        start = datetime.datetime.strptime(start, '%Y-%m-%d')
+        stop = datetime.datetime.strptime(stop, '%Y-%m-%d')
+
+        # Query the Log and Correction models using the start and stop dates as filters
+        logs = list(Log.objects.filter(created_at__range=(start, stop)).values())
+        corrections = list(Correction.objects.filter(created_at__range=(start, stop)).values())
+
+        # Calculate the statistics from the logs and corrections using the helper function
+        data = calculate_stats(logs, corrections)
+
+        return JsonResponse(data)
 
